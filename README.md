@@ -8,6 +8,10 @@
 
 This repository provides the implementation for the paper:  
 **"A Deep Generative Approach to _de novo_ Covalent Drug Design with Enhanced Drug-likeness and Safety"**.
+
+![](overview.png)
+
+
 ## 🧩 Repository Structure
 This repository contains two main modules:  
 
