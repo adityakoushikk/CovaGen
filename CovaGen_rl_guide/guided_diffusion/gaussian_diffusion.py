@@ -5,6 +5,7 @@ https://github.com/hojonathanho/diffusion/blob/1e0dceb3b3495bbe19116a5e1b3596cd0
 Docstrings have been added, as well as DDIM sampling and a new collection of beta schedules.
 """
 import pickle
+import os
 import time
 
 import torch
@@ -22,6 +23,22 @@ from transvae.rnn_models import RNNAttn
 from rdkit import Chem
 from torch_geometric.data import Batch
 import selfies as sf
+
+
+def _normalize_saved_smiles_buffer(saved, expected_size):
+    buffer = [[] for _ in range(expected_size)]
+    if not isinstance(saved, list):
+        raise ValueError("saved pickle is not a list")
+
+    if len(saved) == expected_size and all(isinstance(item, list) for item in saved):
+        return [list(item) for item in saved]
+
+    for idx, item in enumerate(saved):
+        if isinstance(item, list):
+            buffer[idx % expected_size].extend(item)
+        else:
+            buffer[idx % expected_size].append(item)
+    return buffer
 
 
 
@@ -549,11 +566,37 @@ class GaussianDiffusion:
         self.ts = []
 
         self.ls = [[] for _ in range(100)]
+        self._loaded_saving_path = None
         # self.sample_xt = th.empty(0,128).to('cuda:0')
         # self.sample_log_prob_prev_xt = th.empty(0,).to('cuda:0')
         # self.sample_rewards = []
         # self.sample_prev_xt = th.empty(0,128).to('cuda:0')
         # self.ts = th.empty(0,).to('cuda:0')
+
+    def load_existing_smiles_buffer(self, saving_path):
+        if not saving_path or self._loaded_saving_path == saving_path:
+            return
+        self._loaded_saving_path = saving_path
+
+        if not os.path.exists(saving_path) or os.path.getsize(saving_path) == 0:
+            return
+
+        try:
+            with open(saving_path, "rb") as f:
+                saved = pickle.load(f)
+            existing = _normalize_saved_smiles_buffer(saved, len(self.ls))
+        except Exception as exc:
+            print(f"Could not load existing generated molecules from {saving_path}: {exc}")
+            return
+
+        current = self.ls
+        for idx, molecules in enumerate(current):
+            existing[idx].extend(molecules)
+        self.ls = existing
+        print(
+            f"Loaded {sum(len(molecules) for molecules in self.ls)} existing generated molecules "
+            f"from {saving_path}"
+        )
 
     def insert_rlloop(self,rlloop):
 
@@ -977,6 +1020,7 @@ class GaussianDiffusion:
                         crct_ls.append(smis)
                 # print("validity:",len(cnt_ls)/24)
                 print('valid cnt',len(cnt_ls))
+            self.load_existing_smiles_buffer(saving_path)
             for i, item in enumerate(smi_recon):#
                 self.ls[i % 100].append(item)#
             if len(list(set(self.ls[0])))>1:
@@ -990,7 +1034,11 @@ class GaussianDiffusion:
 
             nbt = []
             newbatch = nbt
-            mscore = check_toxicity_xgb_2(crct_ls)  #
+            try:
+                mscore = check_toxicity_xgb_2(crct_ls)  #
+            except Exception as exc:
+                mscore = None
+                print(f"Skipping legacy XGBoost toxicity check: {exc}")
             for i in range(len(self.sample_xt)):
                 self.sample_xt[i] = self.sample_xt[i][cnt_ls]
                 self.sample_prev_xt[i] = self.sample_prev_xt[i][cnt_ls]
