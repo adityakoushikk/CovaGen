@@ -98,7 +98,7 @@ class VAEShell():
         Arguments:
             checkpoint_path (str, required): Path to saved .ckpt file
         """
-        loaded_checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
+        loaded_checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'), weights_only=False)
         self.loaded_from = checkpoint_path
         for k in self.current_state.keys():
             try:
