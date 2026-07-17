@@ -116,7 +116,7 @@ def main():
 	for batch in dat:
 
 		model_kwargs = {}
-		classes = th.tensor(np.ones((100,), dtype=np.int)).to('cuda:0')
+		classes = th.tensor(np.ones((100,), dtype=int)).to('cuda:0')
 		model_kwargs["y"] = classes
 		sample_fn = (
 			diffusion.p_sample_loop if not args.use_ddim else diffusion.ddim_sample_loop
