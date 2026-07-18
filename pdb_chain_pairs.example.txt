@@ -1,0 +1,2 @@
+# One PDB:CHAIN pair per line. Blank lines and comments are ignored by the sbatch script.
+1ghy:H
