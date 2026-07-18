@@ -16,7 +16,7 @@ UNCOND_DIR="${UNCOND_DIR:-${COVAGEN_ROOT}/CovaGen_uncond_cond}"
 
 PAIR_LIST="${PAIR_LIST:-${SCRIPT_DIR}/pdb_chain_pairs.txt}"
 ENV_ACTIVATE="${ENV_ACTIVATE:-${COVAGEN_ROOT}/covagen/bin/activate}"
-SAMPLE_SECONDS="${SAMPLE_SECONDS:-120}"
+SAMPLE_SECONDS="${SAMPLE_SECONDS:-1800}"
 
 MODEL_PATH="${MODEL_PATH:-${RL_DIR}/Models/cond_model009000.pt}"
 CLASSIFIER_PATH="${CLASSIFIER_PATH:-${RL_DIR}/Models/acrylamide_classifier_model010000.pt}"
@@ -25,7 +25,8 @@ DIFFUSION_STEPS="${DIFFUSION_STEPS:-300}"
 NOISE_SCHEDULE="${NOISE_SCHEDULE:-linear}"
 DATASET_SAVE_PATH="${DATASET_SAVE_PATH:-${RL_DIR}/data}"
 PDB_CACHE_DIR="${PDB_CACHE_DIR:-${COVAGEN_ROOT}/.pdb_cache}"
-PDB_SOURCE="${PDB_SOURCE:-seqres}"
+PDB_SOURCE="${PDB_SOURCE:-auto}"
+PDB_CHAIN_KIND="${PDB_CHAIN_KIND:-auth}"
 
 WARHEADS_YAML="${WARHEADS_YAML:-/scratch/users/akoushik/covmedsage/covalent/configs/warheads.yaml}"
 WARHEAD_ID="${WARHEAD_ID:-3723}"
@@ -63,6 +64,9 @@ COVGEN_SMI="${COVALENT_DATA_DIR}/covgen_${TAG}.smi"
 LIGPREP_DIR="${COVALENT_DATA_DIR}/enumerate_frag/covagen_enum/${TAG}"
 LIGPREP_MAE="${LIGPREP_DIR}/${TAG}_placed.mae"
 SEQUENCE_TXT="${RL_DIR}/samples/${TAG}_sequence.txt"
+ATTACH_LOG="${LIGPREP_DIR}/${TAG}_attach_warhead.log"
+SUMMARY_TSV="${LIGPREP_DIR}/${TAG}_summary.tsv"
+GLOBAL_SUMMARY_TSV="${COVALENT_DATA_DIR}/covgen_chain_summary.tsv"
 
 echo "[$(date)] Starting CovaGen chain job"
 echo "Pair: ${PAIR}"
@@ -91,7 +95,13 @@ elif [[ -n "${VIRTUAL_ENV:-}" ]]; then
     export LD_LIBRARY_PATH="${VIRTUAL_ENV}/lib:${LD_LIBRARY_PATH:-}"
 fi
 
-FETCH_ARGS=("${PAIR}" "--cache-dir" "${PDB_CACHE_DIR}" "--source" "${PDB_SOURCE}" "--output" "${SEQUENCE_TXT}")
+FETCH_ARGS=(
+    "${PAIR}"
+    "--cache-dir" "${PDB_CACHE_DIR}"
+    "--source" "${PDB_SOURCE}"
+    "--chain-id-kind" "${PDB_CHAIN_KIND}"
+    "--output" "${SEQUENCE_TXT}"
+)
 if [[ -n "${PDB_DIR:-}" ]]; then
     FETCH_ARGS+=("--pdb-dir" "${PDB_DIR}")
 fi
@@ -136,6 +146,7 @@ if [[ ! -s "${SAMPLE_PKL}" ]]; then
 fi
 
 echo "[$(date)] Attaching/filtering warhead"
+mkdir -p "${LIGPREP_DIR}"
 python "${UNCOND_DIR}/scripts/attach_warhead.py" \
     --input "${SAMPLE_PKL}" \
     --warheads_yaml "${WARHEADS_YAML}" \
@@ -144,11 +155,52 @@ python "${UNCOND_DIR}/scripts/attach_warhead.py" \
     --covagen_atoms C,N,O,S \
     --with_classifier \
     --classifier_keep_n "${CLASSIFIER_KEEP_N}" \
-    --random_seed "${RANDOM_SEED}"
+    --random_seed "${RANDOM_SEED}" \
+    2>&1 | tee "${ATTACH_LOG}"
 
 if [[ ! -s "${COVGEN_SMI}" ]]; then
     echo "No SMILES written at ${COVGEN_SMI}" >&2
     exit 4
+fi
+
+WARHEAD_WRITTEN_COUNT="$(grep -cv '^[[:space:]]*$' "${COVGEN_SMI}")"
+QC_CHECKED="$(sed -n 's/^Valid input SMILES checked for warhead QC: \([0-9][0-9]*\).*/\1/p' "${ATTACH_LOG}" | tail -n 1)"
+QC_REJECTED="$(sed -n 's/^Molecules rejected by warhead QC: \([0-9][0-9]*\)\/.*/\1/p' "${ATTACH_LOG}" | tail -n 1)"
+QC_PASSED=""
+if [[ "${QC_CHECKED}" =~ ^[0-9]+$ && "${QC_REJECTED}" =~ ^[0-9]+$ ]]; then
+    QC_PASSED="$((QC_CHECKED - QC_REJECTED))"
+fi
+echo "Warhead QC pass count for ${PAIR}: ${QC_PASSED:-unknown}"
+echo "Warhead-filtered molecules written for ${PAIR}: ${WARHEAD_WRITTEN_COUNT}"
+
+SUMMARY_HEADER=$'tag\tpair\tsequence_length\twarhead_qc_checked\twarhead_qc_rejected\twarhead_qc_passed\twarhead_written_count\tsample_pkl\twarhead_smi\tattach_log\tligprep_mae'
+SUMMARY_ROW="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+    "${TAG}" \
+    "${PAIR}" \
+    "${#PROTEIN_SEQ}" \
+    "${QC_CHECKED:-}" \
+    "${QC_REJECTED:-}" \
+    "${QC_PASSED:-}" \
+    "${WARHEAD_WRITTEN_COUNT}" \
+    "${SAMPLE_PKL}" \
+    "${COVGEN_SMI}" \
+    "${ATTACH_LOG}" \
+    "${LIGPREP_MAE}")"
+
+printf '%s\n%s\n' "${SUMMARY_HEADER}" "${SUMMARY_ROW}" > "${SUMMARY_TSV}"
+if command -v flock >/dev/null 2>&1; then
+    (
+        flock -x 200
+        if [[ ! -s "${GLOBAL_SUMMARY_TSV}" ]]; then
+            printf '%s\n' "${SUMMARY_HEADER}"
+        fi
+        printf '%s\n' "${SUMMARY_ROW}"
+    ) 200>"${GLOBAL_SUMMARY_TSV}.lock" >> "${GLOBAL_SUMMARY_TSV}"
+else
+    if [[ ! -s "${GLOBAL_SUMMARY_TSV}" ]]; then
+        printf '%s\n' "${SUMMARY_HEADER}" >> "${GLOBAL_SUMMARY_TSV}"
+    fi
+    printf '%s\n' "${SUMMARY_ROW}" >> "${GLOBAL_SUMMARY_TSV}"
 fi
 
 echo "[$(date)] Running LigPrep"
@@ -159,7 +211,6 @@ elif command -v ml >/dev/null 2>&1; then
 fi
 
 : "${SCHRODINGER:?SCHRODINGER is not set after loading the Schrodinger module}"
-mkdir -p "${LIGPREP_DIR}"
 "${SCHRODINGER}/ligprep" \
     -WAIT \
     -epik \
